@@ -1,17 +1,19 @@
 import os
-import textwrap
-import re
 import time
 import sqlite3
-import hashlib
 from datetime import datetime
 
 import streamlit as st
 from dotenv import load_dotenv
+
 from google import genai
 from google.genai import types
 
-# Optional PDF support
+
+# ============================================================
+# OPTIONAL PACKAGES
+# ============================================================
+
 try:
     from pypdf import PdfReader
     PDF_AVAILABLE = True
@@ -19,9 +21,17 @@ except Exception:
     PDF_AVAILABLE = False
 
 
-# =========================================================
-# CONFIG
-# =========================================================
+try:
+    import requests
+    from bs4 import BeautifulSoup
+    WEB_AVAILABLE = True
+except Exception:
+    WEB_AVAILABLE = False
+
+
+# ============================================================
+# PAGE CONFIG
+# ============================================================
 
 st.set_page_config(
     page_title="My AI",
@@ -30,210 +40,93 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+
+# ============================================================
+# ENVIRONMENT
+# ============================================================
+
 load_dotenv()
 
-# Streamlit Cloud Secrets first, local .env second
+GEMINI_API_KEY = None
+
 try:
     GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY")
 except Exception:
-    GEMINI_API_KEY = None
+    pass
 
 if not GEMINI_API_KEY:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Current stable models + fallback
+
+# ============================================================
+# GEMINI MODELS
+# ============================================================
+
 PRIMARY_MODEL = "gemini-3.8-flash"
 FALLBACK_MODEL = "gemini-3.5-flash-lite"
+
+
+# ============================================================
+# DATABASE
+# ============================================================
 
 DB_FILE = "chatbot.db"
 
 
-# =========================================================
-# CUSTOM CSS
-# =========================================================
-
-st.markdown(
-    """
-<style>
-
-#MainMenu {visibility: hidden;}
-footer {visibility: hidden;}
-header {visibility: hidden;}
-
-.stApp {
-    background:
-        radial-gradient(circle at top left, rgba(75, 0, 130, 0.18), transparent 35%),
-        radial-gradient(circle at top right, rgba(0, 120, 255, 0.12), transparent 35%),
-        #080b12;
-    color: #f5f7fb;
-}
-
-.block-container {
-    max-width: 1150px;
-    padding-top: 1.2rem;
-    padding-bottom: 5rem;
-}
-
-[data-testid="stSidebar"] {
-    background: #0d111b;
-    border-right: 1px solid rgba(255,255,255,0.08);
-}
-
-[data-testid="stSidebar"] * {
-    color: #eef2ff;
-}
-
-.hero {
-    padding: 26px;
-    border-radius: 24px;
-    background:
-        linear-gradient(
-            135deg,
-            rgba(91, 33, 182, 0.32),
-            rgba(30, 64, 175, 0.22)
-        );
-    border: 1px solid rgba(255,255,255,0.09);
-    box-shadow: 0 20px 60px rgba(0,0,0,0.25);
-    margin-bottom: 20px;
-}
-
-.hero-title {
-    font-size: 34px;
-    font-weight: 800;
-    margin-bottom: 5px;
-}
-
-.hero-subtitle {
-    color: #aeb8cc;
-    font-size: 15px;
-}
-
-.feature-card {
-    padding: 20px;
-    border-radius: 18px;
-    background: rgba(255,255,255,0.045);
-    border: 1px solid rgba(255,255,255,0.07);
-    min-height: 130px;
-}
-
-.feature-icon {
-    font-size: 28px;
-}
-
-.feature-title {
-    font-weight: 700;
-    margin-top: 8px;
-}
-
-.feature-text {
-    color: #9ca8bd;
-    font-size: 13px;
-}
-
-.chat-user {
-    background: linear-gradient(
-        135deg,
-        rgba(37, 99, 235, 0.24),
-        rgba(59, 130, 246, 0.10)
-    );
-    border: 1px solid rgba(96,165,250,0.18);
-    border-radius: 18px;
-    padding: 14px 17px;
-    margin: 12px 0;
-}
-
-.chat-ai {
-    background: rgba(255,255,255,0.045);
-    border: 1px solid rgba(255,255,255,0.07);
-    border-radius: 18px;
-    padding: 15px 17px;
-    margin: 12px 0;
-}
-
-.chat-label {
-    font-size: 12px;
-    font-weight: 700;
-    color: #94a3b8;
-    margin-bottom: 7px;
-}
-
-.status-pill {
-    display: inline-block;
-    padding: 5px 10px;
-    border-radius: 999px;
-    background: rgba(34,197,94,0.12);
-    border: 1px solid rgba(34,197,94,0.20);
-    color: #86efac;
-    font-size: 12px;
-}
-
-.warning-pill {
-    display: inline-block;
-    padding: 5px 10px;
-    border-radius: 999px;
-    background: rgba(245,158,11,0.12);
-    border: 1px solid rgba(245,158,11,0.20);
-    color: #fcd34d;
-    font-size: 12px;
-}
-
-div[data-testid="stTextInput"] input,
-div[data-testid="stTextArea"] textarea {
-    background: #111827 !important;
-    color: white !important;
-    border: 1px solid #273244 !important;
-    border-radius: 14px !important;
-}
-
-button {
-    border-radius: 12px !important;
-}
-
-[data-testid="stFileUploader"] {
-    background: rgba(255,255,255,0.025);
-    border-radius: 16px;
-    padding: 8px;
-}
-
-@media (max-width: 768px) {
-
-    .block-container {
-        padding-left: 12px;
-        padding-right: 12px;
-    }
-
-    .hero {
-        padding: 20px;
-        border-radius: 18px;
-    }
-
-    .hero-title {
-        font-size: 27px;
-    }
-
-}
-
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-
-# =========================================================
-# DATABASE
-# =========================================================
-
 def get_db():
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn = sqlite3.connect(
+        DB_FILE,
+        check_same_thread=False
+    )
+
     conn.row_factory = sqlite3.Row
+
     return conn
 
 
-def init_db():
-    conn = get_db()
-    cur = conn.cursor()
+def column_exists(conn, table_name, column_name):
 
-    cur.execute(
+    columns = conn.execute(
+        f"PRAGMA table_info({table_name})"
+    ).fetchall()
+
+    return any(
+        row["name"] == column_name
+        for row in columns
+    )
+
+
+def add_column_if_missing(
+    conn,
+    table_name,
+    column_name,
+    column_definition
+):
+
+    if not column_exists(
+        conn,
+        table_name,
+        column_name
+    ):
+
+        conn.execute(
+            f"""
+            ALTER TABLE {table_name}
+            ADD COLUMN {column_name}
+            {column_definition}
+            """
+        )
+
+
+def init_db():
+
+    conn = get_db()
+
+    # ========================================================
+    # SETTINGS
+    # ========================================================
+
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -242,55 +135,181 @@ def init_db():
         """
     )
 
-    cur.execute(
+    add_column_if_missing(
+        conn,
+        "settings",
+        "value",
+        "TEXT"
+    )
+
+    # ========================================================
+    # CHATS
+    # ========================================================
+
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS chats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            title TEXT,
+            created_at TEXT,
+            updated_at TEXT
         )
         """
     )
 
-    cur.execute(
+    add_column_if_missing(
+        conn,
+        "chats",
+        "title",
+        "TEXT"
+    )
+
+    add_column_if_missing(
+        conn,
+        "chats",
+        "created_at",
+        "TEXT"
+    )
+
+    add_column_if_missing(
+        conn,
+        "chats",
+        "updated_at",
+        "TEXT"
+    )
+
+    # ========================================================
+    # MESSAGES
+    # ========================================================
+
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            chat_id INTEGER,
+            role TEXT,
+            content TEXT,
+            created_at TEXT
         )
         """
+    )
+
+    add_column_if_missing(
+        conn,
+        "messages",
+        "chat_id",
+        "INTEGER"
+    )
+
+    add_column_if_missing(
+        conn,
+        "messages",
+        "role",
+        "TEXT"
+    )
+
+    add_column_if_missing(
+        conn,
+        "messages",
+        "content",
+        "TEXT"
+    )
+
+    add_column_if_missing(
+        conn,
+        "messages",
+        "created_at",
+        "TEXT"
+    )
+
+    # ========================================================
+    # REPAIR OLD DATA
+    # ========================================================
+
+    now = datetime.now().isoformat(
+        timespec="seconds"
+    )
+
+    conn.execute(
+        """
+        UPDATE chats
+        SET title = 'New Chat'
+        WHERE title IS NULL
+           OR title = ''
+        """
+    )
+
+    conn.execute(
+        """
+        UPDATE chats
+        SET created_at = ?
+        WHERE created_at IS NULL
+           OR created_at = ''
+        """,
+        (now,)
+    )
+
+    conn.execute(
+        """
+        UPDATE chats
+        SET updated_at = ?
+        WHERE updated_at IS NULL
+           OR updated_at = ''
+        """,
+        (now,)
+    )
+
+    conn.execute(
+        """
+        UPDATE messages
+        SET created_at = ?
+        WHERE created_at IS NULL
+           OR created_at = ''
+        """,
+        (now,)
     )
 
     conn.commit()
     conn.close()
 
 
+# Run database initialization
 init_db()
 
 
-# =========================================================
-# SETTINGS
-# =========================================================
+# ============================================================
+# SETTINGS FUNCTIONS
+# ============================================================
 
-def get_setting(key, default=""):
+def get_setting(
+    key,
+    default=""
+):
+
     conn = get_db()
+
     row = conn.execute(
-        "SELECT value FROM settings WHERE key = ?",
+        """
+        SELECT value
+        FROM settings
+        WHERE key = ?
+        """,
         (key,)
     ).fetchone()
+
     conn.close()
 
-    if row:
-        return row["value"]
+    if row is None:
+        return default
 
-    return default
+    return row["value"] or default
 
 
-def set_setting(key, value):
+def set_setting(
+    key,
+    value
+):
+
     conn = get_db()
 
     conn.execute(
@@ -298,33 +317,49 @@ def set_setting(key, value):
         INSERT INTO settings(key, value)
         VALUES (?, ?)
         ON CONFLICT(key)
-        DO UPDATE SET value=excluded.value
+        DO UPDATE SET value = excluded.value
         """,
-        (key, value),
+        (
+            key,
+            value
+        )
     )
 
     conn.commit()
     conn.close()
 
 
-# =========================================================
+# ============================================================
 # CHAT FUNCTIONS
-# =========================================================
+# ============================================================
 
-def create_chat(title="New Chat"):
-    now = datetime.now().isoformat(timespec="seconds")
+def create_chat(
+    title="New Chat"
+):
+
+    now = datetime.now().isoformat(
+        timespec="seconds"
+    )
 
     conn = get_db()
 
-    cur = conn.execute(
+    cursor = conn.execute(
         """
-        INSERT INTO chats(title, created_at, updated_at)
+        INSERT INTO chats(
+            title,
+            created_at,
+            updated_at
+        )
         VALUES (?, ?, ?)
         """,
-        (title, now, now),
+        (
+            title,
+            now,
+            now
+        )
     )
 
-    chat_id = cur.lastrowid
+    chat_id = cursor.lastrowid
 
     conn.commit()
     conn.close()
@@ -333,6 +368,7 @@ def create_chat(title="New Chat"):
 
 
 def get_chats():
+
     conn = get_db()
 
     rows = conn.execute(
@@ -348,12 +384,19 @@ def get_chats():
     return rows
 
 
-def get_chat(chat_id):
+def get_chat(
+    chat_id
+):
+
     conn = get_db()
 
     row = conn.execute(
-        "SELECT * FROM chats WHERE id = ?",
-        (chat_id,),
+        """
+        SELECT *
+        FROM chats
+        WHERE id = ?
+        """,
+        (chat_id,)
     ).fetchone()
 
     conn.close()
@@ -361,44 +404,71 @@ def get_chat(chat_id):
     return row
 
 
-def rename_chat(chat_id, title):
+def rename_chat(
+    chat_id,
+    title
+):
+
+    now = datetime.now().isoformat(
+        timespec="seconds"
+    )
+
     conn = get_db()
 
     conn.execute(
         """
         UPDATE chats
-        SET title = ?, updated_at = ?
+        SET title = ?,
+            updated_at = ?
         WHERE id = ?
         """,
         (
             title,
-            datetime.now().isoformat(timespec="seconds"),
-            chat_id,
-        ),
+            now,
+            chat_id
+        )
     )
 
     conn.commit()
     conn.close()
 
 
-def delete_chat(chat_id):
+def delete_chat(
+    chat_id
+):
+
     conn = get_db()
 
     conn.execute(
-        "DELETE FROM messages WHERE chat_id = ?",
-        (chat_id,),
+        """
+        DELETE FROM messages
+        WHERE chat_id = ?
+        """,
+        (chat_id,)
     )
 
     conn.execute(
-        "DELETE FROM chats WHERE id = ?",
-        (chat_id,),
+        """
+        DELETE FROM chats
+        WHERE id = ?
+        """,
+        (chat_id,)
     )
 
     conn.commit()
     conn.close()
 
 
-def save_message(chat_id, role, content):
+def save_message(
+    chat_id,
+    role,
+    content
+):
+
+    now = datetime.now().isoformat(
+        timespec="seconds"
+    )
+
     conn = get_db()
 
     conn.execute(
@@ -415,8 +485,8 @@ def save_message(chat_id, role, content):
             chat_id,
             role,
             content,
-            datetime.now().isoformat(timespec="seconds"),
-        ),
+            now
+        )
     )
 
     conn.execute(
@@ -426,16 +496,19 @@ def save_message(chat_id, role, content):
         WHERE id = ?
         """,
         (
-            datetime.now().isoformat(timespec="seconds"),
-            chat_id,
-        ),
+            now,
+            chat_id
+        )
     )
 
     conn.commit()
     conn.close()
 
 
-def get_messages(chat_id):
+def get_messages(
+    chat_id
+):
+
     conn = get_db()
 
     rows = conn.execute(
@@ -445,7 +518,7 @@ def get_messages(chat_id):
         WHERE chat_id = ?
         ORDER BY id ASC
         """,
-        (chat_id,),
+        (chat_id,)
     ).fetchall()
 
     conn.close()
@@ -453,117 +526,326 @@ def get_messages(chat_id):
     return rows
 
 
-# =========================================================
+# ============================================================
 # SESSION STATE
-# =========================================================
+# ============================================================
 
 if "chat_id" not in st.session_state:
-    chats = get_chats()
 
-    if chats:
-        st.session_state.chat_id = chats[0]["id"]
+    existing_chats = get_chats()
+
+    if existing_chats:
+
+        st.session_state.chat_id = (
+            existing_chats[0]["id"]
+        )
+
     else:
+
         st.session_state.chat_id = create_chat()
 
+
 if "mode" not in st.session_state:
+
     st.session_state.mode = "General"
 
+
 if "uploaded_context" not in st.session_state:
+
     st.session_state.uploaded_context = ""
 
+
 if "last_model" not in st.session_state:
+
     st.session_state.last_model = PRIMARY_MODEL
 
 
-# =========================================================
+# ============================================================
 # GEMINI CLIENT
-# =========================================================
+# ============================================================
 
 client = None
 
 if GEMINI_API_KEY:
+
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
+
+        client = genai.Client(
+            api_key=GEMINI_API_KEY
+        )
+
     except Exception:
+
         client = None
 
 
-# =========================================================
-# PROMPTS
-# =========================================================
+# ============================================================
+# CSS
+# ============================================================
 
-def get_system_prompt(mode):
+st.markdown(
+    """
+<style>
+
+#MainMenu {
+    visibility: hidden;
+}
+
+footer {
+    visibility: hidden;
+}
+
+header {
+    visibility: hidden;
+}
+
+.stApp {
+
+    background:
+        radial-gradient(
+            circle at 10% 10%,
+            rgba(99, 102, 241, 0.16),
+            transparent 35%
+        ),
+        radial-gradient(
+            circle at 90% 10%,
+            rgba(14, 165, 233, 0.12),
+            transparent 35%
+        ),
+        #080b12;
+
+    color: #f8fafc;
+}
+
+.block-container {
+
+    max-width: 1150px;
+
+    padding-top: 25px;
+    padding-bottom: 100px;
+}
+
+[data-testid="stSidebar"] {
+
+    background: #0d111b;
+
+    border-right:
+        1px solid
+        rgba(255,255,255,0.08);
+}
+
+[data-testid="stSidebar"] * {
+    color: #f8fafc;
+}
+
+.hero {
+
+    padding: 28px;
+
+    border-radius: 24px;
+
+    background:
+        linear-gradient(
+            135deg,
+            rgba(79,70,229,0.28),
+            rgba(14,165,233,0.16)
+        );
+
+    border:
+        1px solid
+        rgba(255,255,255,0.08);
+
+    margin-bottom: 25px;
+}
+
+.hero-title {
+
+    font-size: 36px;
+
+    font-weight: 800;
+
+    letter-spacing: -1px;
+}
+
+.hero-subtitle {
+
+    color: #aab4c7;
+
+    margin-top: 5px;
+
+    font-size: 15px;
+}
+
+.status {
+
+    padding: 7px 12px;
+
+    border-radius: 999px;
+
+    background:
+        rgba(34,197,94,0.12);
+
+    color: #86efac;
+
+    font-size: 12px;
+
+    border:
+        1px solid
+        rgba(34,197,94,0.18);
+}
+
+.card {
+
+    padding: 22px;
+
+    border-radius: 20px;
+
+    background:
+        rgba(255,255,255,0.045);
+
+    border:
+        1px solid
+        rgba(255,255,255,0.07);
+
+    margin-bottom: 15px;
+}
+
+.small-text {
+
+    color: #94a3b8;
+
+    font-size: 13px;
+}
+
+[data-testid="stChatInput"] {
+
+    border-radius: 18px;
+}
+
+div[data-testid="stTextInput"] input {
+
+    background: #111827 !important;
+
+    color: white !important;
+
+    border:
+        1px solid
+        #263246 !important;
+
+    border-radius: 12px !important;
+}
+
+button {
+
+    border-radius: 12px !important;
+}
+
+</style>
+""",
+    unsafe_allow_html=True
+)
+
+
+# ============================================================
+# SYSTEM PROMPTS
+# ============================================================
+
+def system_prompt(
+    mode
+):
 
     base = """
-You are My AI, a helpful, intelligent and friendly AI assistant.
+You are My AI, a helpful personal AI assistant.
 
-Rules:
-- Give clear and useful answers.
-- Use simple language when the user is a beginner.
-- Do not invent facts.
-- If information is uncertain, say so.
-- For programming questions, explain errors and provide corrected code.
-- Format answers with headings and bullet points when useful.
+Always:
+- Be accurate.
+- Be friendly.
+- Explain clearly.
+- Do not invent information.
+- If the user is a beginner, explain step-by-step.
+- Use headings and bullet points when useful.
 """
 
     if mode == "Study":
-        return base + """
-You are now in STUDY MODE.
 
-Teach step-by-step.
-Use beginner-friendly explanations.
-Give examples.
+        return base + """
+
+You are in Study Mode.
+
+Teach like a patient teacher.
+Explain concepts from basic to advanced.
+Use examples.
 For mathematics, show calculations.
-For programming, explain the logic before the code.
-If the user asks a direct exam question, provide an exam-ready answer.
+For programming, explain the logic first.
 """
 
     if mode == "Coding":
-        return base + """
-You are now in CODING MODE.
 
-Focus on programming.
-Explain:
-1. What is wrong
-2. Why it is wrong
-3. Correct code
-4. Output/example
-5. Simple explanation
+        return base + """
+
+You are in Coding Mode.
+
+For coding questions:
+1. Identify the problem.
+2. Explain why it happens.
+3. Give corrected code.
+4. Explain the corrected code simply.
+5. Show expected output when useful.
 
 Prefer beginner-friendly code.
+"""
+
+    if mode == "Web Search":
+
+        return base + """
+
+You are in Web Search Mode.
+
+The user may provide search results.
+Use those results as supporting information.
+Clearly distinguish search information from your own general explanation.
 """
 
     return base
 
 
-# =========================================================
-# TITLE GENERATOR
-# =========================================================
+# ============================================================
+# TITLE
+# ============================================================
 
-def make_title(text):
+def make_title(
+    text
+):
 
     text = text.strip()
 
     if not text:
+
         return "New Chat"
 
     words = text.split()
 
-    title = " ".join(words[:7])
+    title = " ".join(
+        words[:8]
+    )
 
-    if len(words) > 7:
+    if len(words) > 8:
+
         title += "..."
 
     return title[:60]
 
 
-# =========================================================
-# PDF / TEXT FILE EXTRACTION
-# =========================================================
+# ============================================================
+# FILE READER
+# ============================================================
 
-def extract_uploaded_file(uploaded_file):
+def read_uploaded_file(
+    uploaded_file
+):
 
     if uploaded_file is None:
+
         return ""
 
     filename = uploaded_file.name.lower()
@@ -571,61 +853,72 @@ def extract_uploaded_file(uploaded_file):
     try:
 
         if filename.endswith(".txt"):
+
             return uploaded_file.read().decode(
                 "utf-8",
                 errors="ignore"
-            )
+            )[:30000]
 
         if filename.endswith(".pdf"):
 
             if not PDF_AVAILABLE:
-                return "PDF support is not installed."
 
-            reader = PdfReader(uploaded_file)
+                return (
+                    "PDF support is not installed."
+                )
+
+            reader = PdfReader(
+                uploaded_file
+            )
 
             text = ""
 
             for page in reader.pages:
-                page_text = page.extract_text() or ""
-                text += page_text + "\n"
+
+                text += (
+                    page.extract_text()
+                    or ""
+                )
+
+                text += "\n"
 
             return text[:30000]
 
         return ""
 
-    except Exception as e:
-        return f"Could not read file: {e}"
+    except Exception as error:
+
+        return (
+            f"Could not read file: {error}"
+        )
 
 
-# =========================================================
+# ============================================================
 # WEB SEARCH
-# =========================================================
+# ============================================================
 
-def simple_web_search(query):
+def web_search(
+    query
+):
 
-    """
-    Lightweight DuckDuckGo HTML search.
+    if not WEB_AVAILABLE:
 
-    This is intentionally simple.
-    If the search service blocks the request,
-    the chatbot will continue normally.
-    """
+        return (
+            "Web search packages are not installed."
+        )
 
     try:
 
-        import requests
-        from bs4 import BeautifulSoup
-
-        url = "https://html.duckduckgo.com/html/"
-
-        response = requests.post(
-            url,
-            data={"q": query},
+        response = requests.get(
+            "https://html.duckduckgo.com/html/",
+            params={
+                "q": query
+            },
             headers={
                 "User-Agent":
                 "Mozilla/5.0"
             },
-            timeout=10,
+            timeout=10
         )
 
         soup = BeautifulSoup(
@@ -635,25 +928,42 @@ def simple_web_search(query):
 
         results = []
 
-        for result in soup.select(".result")[:5]:
+        for result in soup.select(
+            ".result"
+        )[:5]:
 
-            title_el = result.select_one(".result__title")
-            snippet_el = result.select_one(".result__snippet")
+            title_element = (
+                result.select_one(
+                    ".result__title"
+                )
+            )
 
-            if not title_el:
+            snippet_element = (
+                result.select_one(
+                    ".result__snippet"
+                )
+            )
+
+            if not title_element:
+
                 continue
 
-            title = title_el.get_text(
-                " ",
-                strip=True
+            title = (
+                title_element.get_text(
+                    " ",
+                    strip=True
+                )
             )
 
             snippet = ""
 
-            if snippet_el:
-                snippet = snippet_el.get_text(
-                    " ",
-                    strip=True
+            if snippet_element:
+
+                snippet = (
+                    snippet_element.get_text(
+                        " ",
+                        strip=True
+                    )
                 )
 
             results.append(
@@ -661,21 +971,27 @@ def simple_web_search(query):
                 f"INFO: {snippet}"
             )
 
+        if not results:
+
+            return "No search results found."
+
         return "\n\n".join(results)
 
-    except Exception as e:
-        return f"Web search unavailable: {e}"
+    except Exception as error:
+
+        return (
+            "Web search failed: "
+            f"{error}"
+        )
 
 
-# =========================================================
-# BUILD PROMPT
-# =========================================================
+# ============================================================
+# BUILD AI PROMPT
+# ============================================================
 
-def build_prompt(user_message):
-
-    system_prompt = get_system_prompt(
-        st.session_state.mode
-    )
+def build_prompt(
+    user_message
+):
 
     history = get_messages(
         st.session_state.chat_id
@@ -685,63 +1001,92 @@ def build_prompt(user_message):
 
     conversation = ""
 
-    for msg in recent_history:
+    for message in recent_history:
+
+        role = message["role"].upper()
+
         conversation += (
-            f"{msg['role'].upper()}: "
-            f"{msg['content']}\n\n"
+            f"{role}: "
+            f"{message['content']}\n\n"
         )
 
-    extra_context = ""
+    file_context = ""
 
     if st.session_state.uploaded_context:
 
-        extra_context += """
-USER UPLOADED FILE:
+        file_context = f"""
+UPLOADED FILE CONTENT:
 
-{file}
+{st.session_state.uploaded_context}
 
-END OF FILE
-""".format(
-            file=st.session_state.uploaded_context
-        )
+END FILE CONTENT
+"""
+
+    search_context = ""
+
+    if st.session_state.mode == "Web Search":
+
+        with st.spinner(
+            "Searching the web..."
+        ):
+
+            search_context = web_search(
+                user_message
+            )
 
     return f"""
-{system_prompt}
+{system_prompt(
+    st.session_state.mode
+)}
 
 USER NAME:
-{get_setting("user_name", "User")}
+{get_setting(
+    "user_name",
+    "User"
+)}
 
 CURRENT MODE:
 {st.session_state.mode}
 
-{extra_context}
+{file_context}
 
-CONVERSATION:
+WEB SEARCH RESULTS:
+{search_context}
+
+CONVERSATION HISTORY:
 {conversation}
 
-USER:
+CURRENT USER MESSAGE:
 {user_message}
 
-ASSISTANT:
+Answer the user now.
 """
 
 
-# =========================================================
-# GEMINI CALL
-# =========================================================
+# ============================================================
+# GEMINI REQUEST
+# ============================================================
 
-def ask_gemini(prompt):
+def ask_gemini(
+    prompt
+):
 
-    if not client:
-        return (
-            "🔐 Gemini API key is not available.\n\n"
-            "Please add `GEMINI_API_KEY` to "
-            "Streamlit Secrets or your `.env` file."
-        )
+    if client is None:
+
+        return """
+🔐 **Gemini API key not found.**
+
+For local use:
+Add `GEMINI_API_KEY` to `.env`.
+
+For Streamlit Cloud:
+Add `GEMINI_API_KEY` in
+App Settings → Secrets.
+"""
 
     models = [
         PRIMARY_MODEL,
-        FALLBACK_MODEL,
+        FALLBACK_MODEL
     ]
 
     last_error = None
@@ -753,92 +1098,143 @@ def ask_gemini(prompt):
             st.session_state.last_model = model
 
             response = client.models.generate_content(
+
                 model=model,
+
                 contents=prompt,
+
                 config=types.GenerateContentConfig(
+
                     temperature=0.7,
-                    max_output_tokens=1200,
-                ),
+
+                    max_output_tokens=1500
+                )
             )
 
-            if response and response.text:
-                return response.text
+            if response is not None:
 
-            return "I received an empty response."
+                if response.text:
 
-        except Exception as e:
+                    return response.text
 
-            last_error = e
+            return (
+                "I received an empty response."
+            )
 
-            error_text = str(e).lower()
+        except Exception as error:
 
-            # Rate limit
+            last_error = error
+
+            error_text = str(
+                error
+            ).lower()
+
+            # --------------------------------------------
+            # RATE LIMIT / QUOTA
+            # --------------------------------------------
+
             if (
                 "429" in error_text
-                or "resource_exhausted" in error_text
-                or "rate limit" in error_text
                 or "quota" in error_text
+                or "resource_exhausted"
+                in error_text
+                or "rate limit"
+                in error_text
             ):
-                # Try fallback model
+
                 continue
 
-            # Temporary server overload
+            # --------------------------------------------
+            # TEMPORARY SERVER ERROR
+            # --------------------------------------------
+
             if (
                 "503" in error_text
-                or "unavailable" in error_text
-                or "overloaded" in error_text
+                or "unavailable"
+                in error_text
+                or "overloaded"
+                in error_text
             ):
+
                 time.sleep(1)
+
                 continue
 
-            # Model unavailable
+            # --------------------------------------------
+            # MODEL NOT FOUND
+            # --------------------------------------------
+
             if (
                 "404" in error_text
-                or "not found" in error_text
+                or "not found"
+                in error_text
             ):
+
                 continue
 
             return (
                 "⚠️ Gemini error:\n\n"
-                f"`{str(e)}`"
+                f"`{error}`"
             )
 
-    # Both models failed
-    error_text = str(last_error).lower()
+    # ========================================================
+    # ALL MODELS FAILED
+    # ========================================================
 
-    if (
-        "429" in error_text
-        or "resource_exhausted" in error_text
-        or "quota" in error_text
-        or "rate" in error_text
-    ):
-        return """
+    if last_error:
+
+        error_text = str(
+            last_error
+        ).lower()
+
+        if (
+            "429" in error_text
+            or "quota" in error_text
+            or "resource_exhausted"
+            in error_text
+            or "rate limit"
+            in error_text
+        ):
+
+            return """
 ⚠️ **Gemini free-tier limit reached.**
 
-I tried both available models:
+The application is working, but Google's
+Gemini API has temporarily limited requests
+for this API project.
 
-- Gemini 3.8 Flash
-- Gemini 3.5 Flash-Lite
-
-Please wait for the quota to reset and try again.
-
-Your API key is being detected correctly.
+Please try again after the quota resets.
 """
 
+        return (
+            "⚠️ Gemini is temporarily unavailable.\n\n"
+            f"`{last_error}`"
+        )
+
     return (
-        "⚠️ Gemini is temporarily unavailable.\n\n"
-        f"Error: `{str(last_error)}`"
+        "⚠️ No response was received."
     )
 
 
-# =========================================================
-# EXPORT CHAT
-# =========================================================
+# ============================================================
+# EXPORT
+# ============================================================
 
-def make_export_text(chat_id):
+def export_chat(
+    chat_id
+):
 
-    chat = get_chat(chat_id)
-    messages = get_messages(chat_id)
+    chat = get_chat(
+        chat_id
+    )
+
+    messages = get_messages(
+        chat_id
+    )
+
+    if not chat:
+
+        return ""
 
     output = []
 
@@ -847,10 +1243,13 @@ def make_export_text(chat_id):
     )
 
     output.append(
-        f"Created: {chat['created_at']}\n"
+        f"Created: "
+        f"{chat['created_at']}\n"
     )
 
-    output.append("\n---\n")
+    output.append(
+        "\n---\n"
+    )
 
     for message in messages:
 
@@ -862,252 +1261,304 @@ def make_export_text(chat_id):
 
         output.append(
             f"\n## {role}\n\n"
-            f"{message['content']}\n"
+        )
+
+        output.append(
+            message["content"]
+        )
+
+        output.append(
+            "\n"
         )
 
     return "\n".join(output)
 
 
-# =========================================================
+# ============================================================
 # SIDEBAR
-# =========================================================
+# ============================================================
 
 with st.sidebar:
 
     st.markdown(
         """
         <div style="
-            font-size:25px;
+            font-size:27px;
             font-weight:800;
-            margin-bottom:15px;
+            margin-bottom:20px;
         ">
         🤖 My AI
         </div>
         """,
-        unsafe_allow_html=True,
+        unsafe_allow_html=True
     )
 
-    # New Chat
+    # --------------------------------------------------------
+    # NEW CHAT
+    # --------------------------------------------------------
+
     if st.button(
         "➕ New Chat",
         use_container_width=True
     ):
 
-        st.session_state.chat_id = create_chat(
-            "New Chat"
+        st.session_state.chat_id = (
+            create_chat()
         )
 
         st.session_state.uploaded_context = ""
 
         st.rerun()
 
-    st.markdown("### 💬 Conversations")
-
-    chats = get_chats()
-
-    for chat in chats:
-
-        col1, col2 = st.columns(
-            [5, 1],
-            gap="small"
-        )
-
-        with col1:
-
-            label = chat["title"]
-
-            if chat["id"] == st.session_state.chat_id:
-                label = "🟣 " + label
-
-            if st.button(
-                label,
-                key=f"open_{chat['id']}",
-                use_container_width=True,
-            ):
-                st.session_state.chat_id = chat["id"]
-                st.session_state.uploaded_context = ""
-                st.rerun()
-
-        with col2:
-
-            if st.button(
-                "⋮",
-                key=f"menu_{chat['id']}"
-            ):
-                st.session_state[
-                    f"show_menu_{chat['id']}"
-                ] = not st.session_state.get(
-                    f"show_menu_{chat['id']}",
-                    False
-                )
-
-        if st.session_state.get(
-            f"show_menu_{chat['id']}",
-            False
-        ):
-
-            rename = st.text_input(
-                "Rename",
-                value=chat["title"],
-                key=f"rename_{chat['id']}",
-            )
-
-            c1, c2 = st.columns(2)
-
-            with c1:
-
-                if st.button(
-                    "Save",
-                    key=f"save_{chat['id']}"
-                ):
-
-                    rename_chat(
-                        chat["id"],
-                        rename.strip()
-                        or "New Chat"
-                    )
-
-                    st.rerun()
-
-            with c2:
-
-                if st.button(
-                    "Delete",
-                    key=f"delete_{chat['id']}"
-                ):
-
-                    delete_chat(chat["id"])
-
-                    remaining = get_chats()
-
-                    if remaining:
-                        st.session_state.chat_id = (
-                            remaining[0]["id"]
-                        )
-                    else:
-                        st.session_state.chat_id = (
-                            create_chat()
-                        )
-
-                    st.rerun()
-
     st.divider()
 
-    # Mode
-    st.markdown("### 🧠 AI Mode")
+    # --------------------------------------------------------
+    # MODE
+    # --------------------------------------------------------
 
-    mode = st.selectbox(
-        "Choose mode",
+    st.markdown(
+        "### 🧠 AI Mode"
+    )
+
+    selected_mode = st.selectbox(
+        "Mode",
         [
             "General",
             "Study",
             "Coding",
+            "Web Search"
         ],
         index=[
             "General",
             "Study",
             "Coding",
-        ].index(st.session_state.mode),
-        label_visibility="collapsed",
-    )
-
-    st.session_state.mode = mode
-
-    # User name
-    st.markdown("### 👤 Your Name")
-
-    user_name = st.text_input(
-        "Name",
-        value=get_setting(
-            "user_name",
-            ""
+            "Web Search"
+        ].index(
+            st.session_state.mode
         ),
-        label_visibility="collapsed",
-        placeholder="Enter your name",
+        label_visibility="collapsed"
     )
 
-    if user_name != get_setting(
+    st.session_state.mode = (
+        selected_mode
+    )
+
+    # --------------------------------------------------------
+    # NAME
+    # --------------------------------------------------------
+
+    st.markdown(
+        "### 👤 Your Name"
+    )
+
+    current_name = get_setting(
         "user_name",
         ""
-    ):
+    )
+
+    new_name = st.text_input(
+        "Name",
+        value=current_name,
+        placeholder="Enter your name",
+        label_visibility="collapsed"
+    )
+
+    if new_name != current_name:
+
         set_setting(
             "user_name",
-            user_name
+            new_name
         )
 
-    # File
-    st.markdown("### 📎 Upload File")
+    # --------------------------------------------------------
+    # FILE UPLOAD
+    # --------------------------------------------------------
+
+    st.markdown(
+        "### 📎 File"
+    )
 
     uploaded_file = st.file_uploader(
-        "PDF or TXT",
-        type=["pdf", "txt"],
-        label_visibility="collapsed",
+        "Upload PDF or TXT",
+        type=[
+            "pdf",
+            "txt"
+        ],
+        label_visibility="collapsed"
     )
 
     if uploaded_file:
 
-        text = extract_uploaded_file(
+        file_text = read_uploaded_file(
             uploaded_file
         )
 
-        st.session_state.uploaded_context = text
+        st.session_state.uploaded_context = (
+            file_text
+        )
 
-        if text:
+        if file_text:
+
             st.success(
-                f"Loaded: {uploaded_file.name}"
+                f"Loaded: "
+                f"{uploaded_file.name}"
             )
 
-    # Export
-    st.markdown("### 📥 Export")
+    # --------------------------------------------------------
+    # CHAT HISTORY
+    # --------------------------------------------------------
 
-    export_text = make_export_text(
+    st.markdown(
+        "### 💬 Chats"
+    )
+
+    chats = get_chats()
+
+    for chat in chats:
+
+        chat_id = chat["id"]
+
+        is_active = (
+            chat_id ==
+            st.session_state.chat_id
+        )
+
+        label = chat["title"]
+
+        if is_active:
+
+            label = (
+                "🟣 "
+                + label
+            )
+
+        if st.button(
+            label,
+            key=f"chat_{chat_id}",
+            use_container_width=True
+        ):
+
+            st.session_state.chat_id = (
+                chat_id
+            )
+
+            st.session_state.uploaded_context = ""
+
+            st.rerun()
+
+    # --------------------------------------------------------
+    # CHAT MANAGEMENT
+    # --------------------------------------------------------
+
+    st.divider()
+
+    st.markdown(
+        "### ⚙️ Chat Settings"
+    )
+
+    current_chat = get_chat(
+        st.session_state.chat_id
+    )
+
+    if current_chat:
+
+        new_title = st.text_input(
+            "Chat name",
+            value=current_chat["title"],
+            key="rename_current_chat"
+        )
+
+        if st.button(
+            "✏️ Rename",
+            use_container_width=True
+        ):
+
+            if new_title.strip():
+
+                rename_chat(
+                    st.session_state.chat_id,
+                    new_title.strip()
+                )
+
+                st.rerun()
+
+        if st.button(
+            "🗑️ Delete Chat",
+            use_container_width=True
+        ):
+
+            delete_chat(
+                st.session_state.chat_id
+            )
+
+            remaining = get_chats()
+
+            if remaining:
+
+                st.session_state.chat_id = (
+                    remaining[0]["id"]
+                )
+
+            else:
+
+                st.session_state.chat_id = (
+                    create_chat()
+                )
+
+            st.rerun()
+
+    # --------------------------------------------------------
+    # EXPORT
+    # --------------------------------------------------------
+
+    st.divider()
+
+    st.markdown(
+        "### 📥 Export"
+    )
+
+    export_data = export_chat(
         st.session_state.chat_id
     )
 
     st.download_button(
         "Download Chat",
-        data=export_text,
+        data=export_data,
         file_name="my_ai_chat.md",
         mime="text/markdown",
-        use_container_width=True,
+        use_container_width=True
     )
+
+    # --------------------------------------------------------
+    # API STATUS
+    # --------------------------------------------------------
 
     st.divider()
 
-    # API status
     if client:
 
-        st.markdown(
-            '<span class="status-pill">'
-            '● API Connected'
-            '</span>',
-            unsafe_allow_html=True,
+        st.success(
+            "● Gemini API Connected"
         )
 
     else:
 
-        st.markdown(
-            '<span class="warning-pill">'
-            '● API Key Missing'
-            '</span>',
-            unsafe_allow_html=True,
+        st.warning(
+            "● Gemini API Key Missing"
         )
 
     st.caption(
-        f"Model: {st.session_state.last_model}"
+        "Model: "
+        + st.session_state.last_model
     )
 
 
-# =========================================================
+# ============================================================
 # MAIN HEADER
-# =========================================================
-
-chat = get_chat(
-    st.session_state.chat_id
-)
+# ============================================================
 
 st.markdown(
-    f"""
+    """
     <div class="hero">
 
         <div class="hero-title">
@@ -1115,23 +1566,27 @@ st.markdown(
         </div>
 
         <div class="hero-subtitle">
-            Your personal AI assistant —
-            {st.session_state.mode} Mode
+            Your intelligent personal AI assistant
         </div>
 
     </div>
     """,
-    unsafe_allow_html=True,
+    unsafe_allow_html=True
 )
 
 
-# =========================================================
-# WELCOME SCREEN
-# =========================================================
+# ============================================================
+# CURRENT CHAT
+# ============================================================
 
 messages = get_messages(
     st.session_state.chat_id
 )
+
+
+# ============================================================
+# WELCOME
+# ============================================================
 
 if not messages:
 
@@ -1139,11 +1594,11 @@ if not messages:
         """
         <div style="
             text-align:center;
-            padding:25px 10px 20px;
+            padding:35px 10px;
         ">
 
             <div style="
-                font-size:50px;
+                font-size:55px;
             ">
                 ✨
             </div>
@@ -1153,158 +1608,187 @@ if not messages:
             </h2>
 
             <p style="
-                color:#9ca8bd;
+                color:#94a3b8;
             ">
-                Ask anything, learn something,
-                or build something.
+                Ask anything. Learn anything.
+                Build anything.
             </p>
 
         </div>
         """,
-        unsafe_allow_html=True,
+        unsafe_allow_html=True
     )
 
-    c1, c2, c3 = st.columns(3)
+    col1, col2, col3 = st.columns(3)
 
-    with c1:
+    with col1:
+
         st.markdown(
             """
-            <div class="feature-card">
-                <div class="feature-icon">📚</div>
-                <div class="feature-title">
-                    Study
+            <div class="card">
+
+                <div style="font-size:30px">
+                    📚
                 </div>
-                <div class="feature-text">
+
+                <b>
+                    Study Mode
+                </b>
+
+                <div class="small-text">
                     Learn concepts step-by-step.
                 </div>
+
             </div>
             """,
-            unsafe_allow_html=True,
+            unsafe_allow_html=True
         )
 
-    with c2:
+    with col2:
+
         st.markdown(
             """
-            <div class="feature-card">
-                <div class="feature-icon">💻</div>
-                <div class="feature-title">
-                    Coding
+            <div class="card">
+
+                <div style="font-size:30px">
+                    💻
                 </div>
-                <div class="feature-text">
-                    Debug and understand code.
+
+                <b>
+                    Coding Mode
+                </b>
+
+                <div class="small-text">
+                    Write, debug and learn code.
                 </div>
+
             </div>
             """,
-            unsafe_allow_html=True,
+            unsafe_allow_html=True
         )
 
-    with c3:
+    with col3:
+
         st.markdown(
             """
-            <div class="feature-card">
-                <div class="feature-icon">🧠</div>
-                <div class="feature-title">
-                    General AI
+            <div class="card">
+
+                <div style="font-size:30px">
+                    🔎
                 </div>
-                <div class="feature-text">
-                    Ask questions and explore ideas.
+
+                <b>
+                    Web Search
+                </b>
+
+                <div class="small-text">
+                    Search the web for information.
                 </div>
+
             </div>
             """,
-            unsafe_allow_html=True,
+            unsafe_allow_html=True
         )
 
 
-# =========================================================
-# DISPLAY CHAT
-# =========================================================
+# ============================================================
+# DISPLAY MESSAGES
+# ============================================================
 
 for message in messages:
 
-    if message["role"] == "user":
+    role = message["role"]
 
-        st.markdown(
-            f"""
-            <div class="chat-user">
+    if role == "user":
 
-                <div class="chat-label">
-                    YOU
-                </div>
+        with st.chat_message(
+            "user"
+        ):
 
-                <div>
-                    {message["content"]}
-                </div>
-
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+            st.markdown(
+                message["content"]
+            )
 
     else:
 
-        st.markdown(
-            """
-            <div class="chat-ai">
+        with st.chat_message(
+            "assistant"
+        ):
 
-                <div class="chat-label">
-                    MY AI
-                </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        st.markdown(
-            message["content"]
-        )
-
-        st.markdown(
-            "</div>",
-            unsafe_allow_html=True,
-        )
+            st.markdown(
+                message["content"]
+            )
 
 
-# =========================================================
+# ============================================================
 # CHAT INPUT
-# =========================================================
+# ============================================================
 
 user_message = st.chat_input(
-    "Message My AI..."
+    "Ask me anything..."
 )
 
 
 if user_message:
 
-    user_message = user_message.strip()
+    user_message = (
+        user_message.strip()
+    )
 
     if not user_message:
+
         st.stop()
 
-    # First message -> auto title
+    # --------------------------------------------------------
+    # AUTO TITLE
+    # --------------------------------------------------------
+
     if len(messages) == 0:
 
         rename_chat(
             st.session_state.chat_id,
-            make_title(user_message),
+            make_title(
+                user_message
+            )
         )
 
-    # Save user message
+    # --------------------------------------------------------
+    # SAVE USER MESSAGE
+    # --------------------------------------------------------
+
     save_message(
         st.session_state.chat_id,
         "user",
-        user_message,
+        user_message
     )
 
-    # Display immediately
-    with st.chat_message("user"):
-        st.markdown(user_message)
+    # --------------------------------------------------------
+    # SHOW USER MESSAGE
+    # --------------------------------------------------------
 
-    # Build prompt
+    with st.chat_message(
+        "user"
+    ):
+
+        st.markdown(
+            user_message
+        )
+
+    # --------------------------------------------------------
+    # CREATE PROMPT
+    # --------------------------------------------------------
+
     prompt = build_prompt(
         user_message
     )
 
-    # AI response
-    with st.chat_message("assistant"):
+    # --------------------------------------------------------
+    # AI RESPONSE
+    # --------------------------------------------------------
+
+    with st.chat_message(
+        "assistant"
+    ):
 
         with st.spinner(
             "My AI is thinking..."
@@ -1314,13 +1798,19 @@ if user_message:
                 prompt
             )
 
-        st.markdown(answer)
+        st.markdown(
+            answer
+        )
 
-    # Save response
+    # --------------------------------------------------------
+    # SAVE AI RESPONSE
+    # --------------------------------------------------------
+
     save_message(
         st.session_state.chat_id,
         "assistant",
-        answer,
+        answer
     )
 
+    # Refresh UI
     st.rerun()
